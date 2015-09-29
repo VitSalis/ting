@@ -14,8 +14,8 @@ The client-side architecture is built using
 
 There are several react components on the client-side. The Ting component is of
 significance, because it is responsible for networking with the server-side of
-the ting application. The Ting component uses web sockets to communicate with
-the real-time portion of the server and AJAX to communicate with the API
+the ting application. The Ting component uses web sockets and AJAX to communicate with
+the real-time portion of the server and AJAX to communicate with the RESTful API
 portion of the server.
 
 The rest of the components are agnostic in regards to networking, and are able
@@ -47,38 +47,32 @@ privileged: The privileges of the real-time service are elevated so that
 it can provide authoritative data to the RESTful API. Authentication for
 this is performed by providing a shared secret in every request.
 
+### Typing
+
+The protocol is backwards-compatible with clients that do not support typing. These
+clients can ignore real-time messages related to typing and simply send their completed
+messages using the HTTP end-points without informing the server during typing.
+
 ## Real-time API
 
 The real-time API deals with maintaining the state of who is online and performs
-message exchange. Communication happens using socket.io. The messages that can
-be sent to the server are the following:
+message exchange. Also it acts as a proxy for the RESTful API. The real-time
+API decides which operations will be handled by it and which will be forwarded to
+the Django RESTful API.
+Communication happens using both HTTP and web sockets. Web socket
+communication is implemented using [socket.io](http://socket.io/).
+
+The real-time server allows the following web-socket messages to be sent:
 
 * `login`: Indicates that a user is logging in on the server by providing the
-  user information. Requires a `username` parameter. If the username is
-  invalid, the server will close the connection.
+  user information. Requires a `username` and a `ting_auth` parameter. The real-time
+  service then checks that the authentication tokens are valid with the RESTful
+  API. If the authentication fails, the real-time service closes the connection.
+  The `ting_auth` parameter provided by the client must be gathered by the client
+  by requesting a new session from the RESTful API. This message must be sent before
+  any other messages.
 
-* `message`: Sends a message from the user to a channel or to another user
-  directly. Takes three parameters:
-
-  1. `type`: A string which is either `channel` or `user`, indicating whether
-     the recipient of the message is a channel or a user.
-  2. `target`: The name of the channel or the user we wish to send the message
-     to.
-  3. `text`: The text of the message.
-
-* `start-typing`: Indicates that a user started typing a new message. Expects
-  the following parameters:
-
-  1. `type`: A string which is either `channel` or `user`.
-  2. `target`: The name of the channel or the user we wish to send the message
-     to.
-  3. `text`: The text of the message typed so far.
-
-* `typing-update`: Sends an update on the message that is being typed. Expects
-  a `messageid` parameter indicating the id of the message that is being updated
-  and a `text` parameter indicating the updated text of the message.
-
-The server can publish the following messages:
+The real-time server can publish using web-sockets the following messages:
 
 * `login-response`: Indicates if a user logged in on the server. It includes
   two parameters. The `success` parameter which is a boolean that indicates 
@@ -101,10 +95,6 @@ The server can publish the following messages:
   window. Includes four parameters, `username`, `type`, `target`, and `text`,
   as per above. If `type` is set to `user`, then `target` must be your username.
 
-* `start-typing-response`: Indicates that the message that was sent via `start-typing`
-  has been saved in the database. It includes one parameter, `messageid`, which is
-  the id of the new message that is currently being typed.
-
 * `update-typing-messages`: Indicates that the messages that are being typed are updated.
   It includes one parameter, `messages_typing`, which is a dictionary of messages.
   The dictionary of messages contains a key with its messageid for each message, whose
@@ -119,12 +109,44 @@ The server can publish the following messages:
   4. `datetime_start`: A unix epoch in ms which indicates the datetime the
      message started being typed.
 
+The real-time server exposes an HTTP endpoint at `https://ting.gr/api/v1` with the following
+URLs:
+
+* A PATCH operation on `/message`: Sends an update on the message with an id equal to <messageid>.
+  The message can be sent from the user to a channel or to another user directly.
+  Takes five parameters:
+
+  1. `type`: A string which is either `channel` or `user`, indicating whether
+     the recipient of the message is a channel or a user.
+  2. `target`: The name of the channel or the user we wish to send the message
+     to.
+  3. `text`: The text of the message.
+  4. `typing`: A boolean that indicates if the message is currently
+     being typed or not.
+  5. `messageid`: An integer which is the unique id of the message being sent.
+
+     * There is no response for this operation.
+
+* A POST operation on `/message`: Indicates that a user started typing a new message. Expects
+  the following parameters:
+
+  1. `type`: A string which is either `channel` or `user`.
+  2. `target`: The name of the channel or the user we wish to send the message
+     to.
+  3. `text`: The text of the message typed so far.
+
+    * The response contains the `messageid`, which is the id of the
+      new message that is currently being typed.
+
+* Operations on `/messages/` and `/channels/` are forwarded to the RESTful API
+  with the appropriate parameters..
+
 ## RESTful API
 
 The RESTful API deals with four resources: Messages, Channels, Users, Sessions. The
 responses are always given in JSON. As such, we make no use of Django templates,
 only models and views. The URLs of the RESTful API live under the
-`https://ting.gr/api/v1` URL.
+`https://ting.gr/restapi/v1` URL.
 
 ### Messages
 The Messages resource is used to store and retrieve chat messages. It is
@@ -153,7 +175,6 @@ There are four operations:
    * `datetime_sent`: The time the message was sent, in UTC epoch milliseconds.
    * `typing`: Indicates whether the message is currently being typed.
       Takes a boolean value.
-
 
 2. A POST operation on `/messages/<type>/<target>`. This is a **privileged
    operation** that persists a message on a given channel or private. The POST
@@ -211,9 +232,11 @@ status code.
 The Session resource is used to create and delete a session for logging in and out. 
 It is accessible through the `/sessions` URL. 
 
-There are 2 operations:
+There are 3 operations:
 
 ####Logging in
+
+This operation is performed by the client to the RESTful API server for logging in.
 
 A POST request on `/sessions`. The body of the request contains a dictionary:
 
@@ -254,7 +277,20 @@ request, it gets created internally.
 
 ####Logging out
 
+This operation is performed by the client to the RESTful API server for logging out.
+
 A DELETE request on `/sessions`.
 
 During this request the server checks if this user has set a password. If not, then along 
 with the session, the user gets deleted, too.
+
+####Checking authentication
+
+This operation is performed by the real-time service to the RESTful API server for verifying
+that a given client cookie is correct.
+
+A GET request on `/sessions/<username>`. This request must be performed using the `ting_auth`
+cookie that the user provided. If the cookie is valid for the given user, a 204 (No Content) response
+is returned. Otherwise, a 403 (Forbidden) response is returned.
+
+This is a privileged operation.
